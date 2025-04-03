@@ -347,7 +347,7 @@ func setupRoutes(r *gin.Engine, openaiService *OpenAIService, pineconeService *P
 		messages := getSessionMessages(sessionId)
 
 		// Add system message with context if available
-		systemPrompt := "You are like a second brain to the user. Answer the user's question as accurately as possible. And only give relevent responses saved by user no extra unnecessary information. But read all top results and create a message by extracting information from all and creating a message. Keep the response short and to the point."
+		systemPrompt := "You are like a second brain to the user. Answer the user's question as accurately as possible. And only give relevent responses saved by user no extra unnecessary information. But read all top context results and create a message by extracting information from all and creating a message. Keep the response short and to the point."
 		if contextText != "" {
 			systemPrompt += " Use the following context to help answer the user's question: " + contextText
 		}
