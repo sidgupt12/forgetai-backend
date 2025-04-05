@@ -4,10 +4,26 @@ go 1.23.0
 
 require (
 	github.com/gin-gonic/gin v1.10.0
+	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/joho/godotenv v1.5.1
+	github.com/ledongthuc/pdf v0.0.0-20240201131950-da5b75280b06
+	github.com/lestrrat-go/jwx v1.2.30
 	github.com/pinecone-io/go-pinecone/v3 v3.1.0
 	github.com/sashabaranov/go-openai v1.38.1
 	google.golang.org/protobuf v1.36.6
+)
+
+require (
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
+	github.com/lestrrat-go/backoff/v2 v2.0.8 // indirect
+	github.com/lestrrat-go/blackmagic v1.0.2 // indirect
+	github.com/lestrrat-go/httpcc v1.0.1 // indirect
+	github.com/lestrrat-go/iter v1.0.2 // indirect
+	github.com/lestrrat-go/option v1.0.1 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/rogpeppe/go-internal v1.11.0 // indirect
+	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
 require (
@@ -22,7 +38,7 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.26.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
-	github.com/google/uuid v1.6.0 // indirect
+	github.com/google/uuid v1.6.0
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
