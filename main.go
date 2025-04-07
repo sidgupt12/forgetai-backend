@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -19,6 +20,11 @@ import (
 	"github.com/sashabaranov/go-openai"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+// RedisService handles Redis connections and operations
+type RedisService struct {
+	client *redis.Client
+}
 
 // Data models - keeping your existing models
 type Data struct {
@@ -70,10 +76,94 @@ type ClerkAuth struct {
 	JWKSet     jwk.Set
 	IssuerURL  string
 	LastUpdate time.Time
+	Redis      *RedisService
+}
+
+// NewRedisService creates a new Redis service
+func NewRedisService() (*RedisService, error) {
+	opt, err := redis.ParseURL(os.Getenv("UPSTASH_REDIS_URL"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Redis URL: %v", err)
+	}
+
+	client := redis.NewClient(opt)
+
+	// Test connection
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = client.Ping(ctx).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to Redis: %v", err)
+	}
+
+	return &RedisService{
+		client: client,
+	}, nil
+}
+
+// CheckRateLimit checks if a user has exceeded their API call limit
+// Returns true if rate limit is exceeded, false otherwise
+func (s *RedisService) CheckRateLimit(ctx context.Context, userId, endpoint string) (bool, error) {
+	key := fmt.Sprintf("rate-limit:%s:%s:%s", userId, endpoint, time.Now().Format("2006-01-02"))
+
+	// Increment the counter
+	count, err := s.client.Incr(ctx, key).Result()
+	if err != nil {
+		return false, fmt.Errorf("failed to check rate limit: %v", err)
+	}
+
+	// Set expiry if this is a new key (30 minutes instead of 24 hours)
+	if count == 1 {
+		err = s.client.Expire(ctx, key, 30*time.Minute).Err()
+		if err != nil {
+			return false, fmt.Errorf("failed to set expiry on rate limit key: %v", err)
+		}
+	}
+
+	// Check if rate limit exceeded (10 calls per user per endpoint per day)
+	return count > 10, nil
+}
+
+func (s *RedisService) GetRateLimitCount(ctx context.Context, userId, endpoint string) (int, error) {
+	key := fmt.Sprintf("rate-limit:%s:%s:%s", userId, endpoint, time.Now().Format("2006-01-02"))
+
+	count, err := s.client.Get(ctx, key).Int()
+	if err == redis.Nil {
+		return 0, nil // Key doesn't exist, so count is 0
+	} else if err != nil {
+		return 0, fmt.Errorf("failed to get rate limit count: %v", err)
+	}
+
+	return count, nil
+}
+
+func (s *RedisService) StoreJWKs(ctx context.Context, jwksData []byte) error {
+	return s.client.Set(ctx, "clerk-jwks", jwksData, 30*time.Minute).Err()
+}
+
+// GetJWKs retrieves JWKS from Redis cache
+func (s *RedisService) GetJWKs(ctx context.Context) ([]byte, error) {
+	return s.client.Get(ctx, "clerk-jwks").Bytes()
+}
+
+// ClearRateLimits clears all rate limiting keys for a specific user
+func (s *RedisService) ClearRateLimits(ctx context.Context, userId string) (int64, error) {
+	pattern := fmt.Sprintf("rate-limit:%s:*", userId)
+	keys, err := s.client.Keys(ctx, pattern).Result()
+	if err != nil {
+		return 0, fmt.Errorf("failed to find keys: %v", err)
+	}
+
+	if len(keys) == 0 {
+		return 0, nil
+	}
+
+	return s.client.Del(ctx, keys...).Result()
 }
 
 // NewClerkAuth creates a new Clerk authenticator
-func NewClerkAuth() (*ClerkAuth, error) {
+func NewClerkAuth(redisService *RedisService) (*ClerkAuth, error) {
 	issuerURL := os.Getenv("CLERK_ISSUER_URL")
 	if issuerURL == "" {
 		return nil, fmt.Errorf("CLERK_ISSUER_URL environment variable not set")
@@ -81,6 +171,7 @@ func NewClerkAuth() (*ClerkAuth, error) {
 
 	auth := &ClerkAuth{
 		IssuerURL: issuerURL,
+		Redis:     redisService,
 	}
 
 	// Fetch JWKs on initialization
@@ -92,22 +183,60 @@ func NewClerkAuth() (*ClerkAuth, error) {
 }
 
 // RefreshJWKs fetches the latest JWKs from Clerk
+// func (c *ClerkAuth) RefreshJWKs() error {
+// 	jwksURL := fmt.Sprintf("%s/.well-known/jwks.json", c.IssuerURL)
+// 	set, err := jwk.Fetch(context.Background(), jwksURL)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to fetch JWKs: %v", err)
+// 	}
+
+// 	c.JWKSet = set
+// 	c.LastUpdate = time.Now()
+// 	return nil
+// }
+
 func (c *ClerkAuth) RefreshJWKs() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Try to get JWKs from Redis first
+	if c.Redis != nil {
+		jwksData, err := c.Redis.GetJWKs(ctx)
+		if err == nil && len(jwksData) > 0 {
+			set, err := jwk.Parse(jwksData)
+			if err == nil {
+				c.JWKSet = set
+				c.LastUpdate = time.Now()
+				return nil
+			}
+		}
+	}
+
+	// Fetch from Clerk if not in Redis
 	jwksURL := fmt.Sprintf("%s/.well-known/jwks.json", c.IssuerURL)
-	set, err := jwk.Fetch(context.Background(), jwksURL)
+	set, err := jwk.Fetch(ctx, jwksURL)
 	if err != nil {
 		return fmt.Errorf("failed to fetch JWKs: %v", err)
 	}
 
 	c.JWKSet = set
 	c.LastUpdate = time.Now()
+
+	// Store in Redis for future use
+	if c.Redis != nil {
+		jwksJSON, err := json.Marshal(set)
+		if err == nil {
+			c.Redis.StoreJWKs(ctx, jwksJSON)
+		}
+	}
+
 	return nil
 }
 
 // VerifyToken verifies a JWT token from Clerk
 func (c *ClerkAuth) VerifyToken(tokenString string) (jwt.MapClaims, error) {
-	// Check if JWKs need refreshing (every 24 hours)
-	if time.Since(c.LastUpdate) > 24*time.Hour {
+	// Check if JWKs need refreshing (every 30 minutes instead of 24 hours)
+	if time.Since(c.LastUpdate) > 30*time.Minute {
 		if err := c.RefreshJWKs(); err != nil {
 			// Continue with existing keys if refresh fails
 			fmt.Printf("Warning: Failed to refresh JWKs: %v\n", err)
@@ -152,16 +281,6 @@ func (c *ClerkAuth) VerifyToken(tokenString string) (jwt.MapClaims, error) {
 		return nil, fmt.Errorf("invalid claims format")
 	}
 
-	// // Verify the issuer
-	// if !claims.VerifyIssuer(c.IssuerURL, true) {
-	// 	return nil, fmt.Errorf("invalid issuer")
-	// }
-
-	// // Verify expiration
-	// if !claims.VerifyExpiresAt(time.Now().Unix(), true) {
-	// 	return nil, fmt.Errorf("token expired")
-	// }
-
 	issuer, ok := claims["iss"].(string)
 	if !ok || issuer != c.IssuerURL {
 		return nil, fmt.Errorf("invalid issuer")
@@ -173,6 +292,48 @@ func (c *ClerkAuth) VerifyToken(tokenString string) (jwt.MapClaims, error) {
 	}
 
 	return claims, nil
+}
+
+// Rate limiting middleware
+func rateLimitMiddleware(redisService *RedisService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Get user ID from context (set by auth middleware)
+		userId, exists := c.Get("userId")
+		if !exists {
+			c.Next()
+			return
+		}
+
+		// Extract endpoint from request path
+		path := c.Request.URL.Path
+		endpoint := strings.TrimPrefix(path, "/api/")
+		if idx := strings.Index(endpoint, "/"); idx > 0 {
+			endpoint = endpoint[:idx] // Only use the first part of the path
+		}
+
+		// Check rate limit
+		exceeded, err := redisService.CheckRateLimit(c.Request.Context(), userId.(string), endpoint)
+		if err != nil {
+			// Log error but let request through if there's an issue with rate limiting
+			fmt.Printf("Rate limiting error: %v\n", err)
+			c.Next()
+			return
+		}
+
+		if exceeded {
+			count, _ := redisService.GetRateLimitCount(c.Request.Context(), userId.(string), endpoint)
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":       "Rate limit exceeded. Maximum 10 requests per API endpoint per day.",
+				"limit":       10,
+				"count":       count,
+				"retry_after": "Try again tomorrow",
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
 }
 
 // Helper functions
@@ -293,7 +454,7 @@ func (s *PineconeService) QueryVectors(ctx context.Context, userId string, embed
 
 	res, err := idxConnection.QueryByVectorValues(ctx, &pinecone.QueryByVectorValuesRequest{
 		Vector:          embedding,
-		TopK:            5,
+		TopK:            50,
 		IncludeValues:   false,
 		IncludeMetadata: true,
 		MetadataFilter:  filter,
@@ -404,7 +565,7 @@ func authMiddleware(clerkAuth *ClerkAuth) gin.HandlerFunc {
 }
 
 // Handler setup
-func setupRoutes(r *gin.Engine, openaiService *OpenAIService, pineconeService *PineconeService, clerkAuth *ClerkAuth) {
+func setupRoutes(r *gin.Engine, openaiService *OpenAIService, pineconeService *PineconeService, clerkAuth *ClerkAuth, redisService *RedisService) {
 	// Public endpoints (if any)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -413,6 +574,7 @@ func setupRoutes(r *gin.Engine, openaiService *OpenAIService, pineconeService *P
 	// Protected API group
 	api := r.Group("/api")
 	api.Use(authMiddleware(clerkAuth))
+	api.Use(rateLimitMiddleware(redisService))
 
 	api.POST("/save", func(c *gin.Context) {
 		var req Data
@@ -837,6 +999,70 @@ func setupRoutes(r *gin.Engine, openaiService *OpenAIService, pineconeService *P
 		})
 	})
 
+	api.GET("/usage", func(c *gin.Context) {
+		userId, exists := c.Get("userId")
+		if !exists {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "User ID not found in request context"})
+			return
+		}
+
+		ctx := c.Request.Context()
+
+		// Get today's date
+		today := time.Now().Format("2006-01-02")
+
+		// Check usage for all endpoints
+		endpoints := []string{"save", "query", "reset-session", "save-tweet", "save-pdf"}
+		usageStats := make(map[string]int)
+
+		for _, endpoint := range endpoints {
+			count, err := redisService.GetRateLimitCount(ctx, userId.(string), endpoint)
+			if err != nil {
+				usageStats[endpoint] = -1 // Error state
+			} else {
+				usageStats[endpoint] = count
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"user_id":            userId.(string),
+			"date":               today,
+			"usage":              usageStats,
+			"limit_per_endpoint": 10,
+		})
+	})
+
+	// Add admin route for clearing rate limits (should be protected properly in production)
+	r.POST("/admin/clear-cache", func(c *gin.Context) {
+		// This should have additional admin-only authentication in production
+		// For now, using a simple API key for demo purposes
+		apiKey := c.GetHeader("X-Admin-API-Key")
+		if apiKey != os.Getenv("ADMIN_API_KEY") {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			return
+		}
+
+		ctx := c.Request.Context()
+		userId := c.Query("userId")
+
+		if userId == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "User ID required"})
+			return
+		}
+
+		// Clear all rate limiting keys for the specified user
+		cleared, err := redisService.ClearRateLimits(ctx, userId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to clear cache: %v", err)})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":      fmt.Sprintf("Successfully cleared rate limit cache for user %s", userId),
+			"keys_cleared": cleared,
+		})
+	})
+
 }
 
 func main() {
@@ -850,6 +1076,7 @@ func main() {
 		"PINECONE_API_KEY",
 		"PINECONE_INDEX_HOST",
 		"CLERK_ISSUER_URL",
+		"UPSTASH_REDIS_URL",
 	}
 
 	for _, envVar := range requiredEnvVars {
@@ -867,8 +1094,13 @@ func main() {
 		fmt.Printf("Failed to initialize Pinecone service: %v\n", err)
 		os.Exit(1)
 	}
+	redisService, err := NewRedisService()
+	if err != nil {
+		fmt.Printf("Failed to initialize Redis service: %v\n", err)
+		os.Exit(1)
+	}
 
-	clerkAuth, err := NewClerkAuth()
+	clerkAuth, err := NewClerkAuth(redisService)
 	if err != nil {
 		fmt.Printf("Failed to initialize Clerk authentication: %v\n", err)
 		os.Exit(1)
@@ -894,7 +1126,7 @@ func main() {
 	})
 
 	// Setup routes
-	setupRoutes(r, openaiService, pineconeService, clerkAuth)
+	setupRoutes(r, openaiService, pineconeService, clerkAuth, redisService)
 
 	// Get port from environment or use default
 	port := os.Getenv("PORT")
