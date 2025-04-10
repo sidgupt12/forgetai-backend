@@ -10,9 +10,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/ledongthuc/pdf"
 	"github.com/sashabaranov/go-openai"
+	"github.com/siddhantgupta/forgetai-backend/internal/database"
 	"github.com/siddhantgupta/forgetai-backend/internal/models"
 	"github.com/siddhantgupta/forgetai-backend/internal/services"
 	"github.com/siddhantgupta/forgetai-backend/internal/utils"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // Handlers contains all HTTP handlers
@@ -21,6 +23,7 @@ type Handlers struct {
 	Pinecone  *services.PineconeService
 	Redis     *services.RedisService
 	Session   *services.SessionService
+	DB        *database.MongoDB
 	AdminKey  string
 	XAPIToken string
 }
@@ -31,6 +34,7 @@ func NewHandlers(
 	pinecone *services.PineconeService,
 	redis *services.RedisService,
 	session *services.SessionService,
+	db *database.MongoDB,
 	adminKey string,
 	xAPIToken string,
 ) *Handlers {
@@ -39,6 +43,7 @@ func NewHandlers(
 		Pinecone:  pinecone,
 		Redis:     redis,
 		Session:   session,
+		DB:        db,
 		AdminKey:  adminKey,
 		XAPIToken: xAPIToken,
 	}
@@ -79,6 +84,21 @@ func (h *Handlers) SaveData(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upsert to database: " + err.Error()})
 		return
+	}
+
+	userData := &database.UserData{
+		UserID:     req.UserId,
+		VectorID:   vectorId,
+		DataType:   req.Selected_type,
+		DataValue:  req.Text,
+		ChunkIndex: 0,
+		CreatedAt:  time.Now(),
+	}
+
+	_, err = h.DB.CreateUserData(c.Request.Context(), userData)
+	if err != nil {
+		// Log error but continue since data is in Pinecone
+		fmt.Printf("Warning: Failed to save to MongoDB: %v\n", err)
 	}
 
 	c.JSON(http.StatusOK, models.UpsertResponse{
@@ -384,6 +404,21 @@ func (h *Handlers) SaveTweet(c *gin.Context) {
 		return
 	}
 
+	userData := &database.UserData{
+		UserID:     userId.(string),
+		VectorID:   vectorId,
+		DataType:   "tweet",
+		DataValue:  tweetText,
+		ChunkIndex: 0,
+		CreatedAt:  time.Now(),
+	}
+
+	_, err = h.DB.CreateUserData(c.Request.Context(), userData)
+	if err != nil {
+		// Log error but continue since data is in Pinecone
+		fmt.Printf("Warning: Failed to save tweet to MongoDB: %v\n", err)
+	}
+
 	// Return success response
 	c.JSON(http.StatusOK, models.UpsertResponse{
 		Message:   "Tweet saved successfully",
@@ -394,6 +429,109 @@ func (h *Handlers) SaveTweet(c *gin.Context) {
 		Timestamp: time.Now(),
 	})
 }
+
+// SavePDF handles PDF saving requests
+// func (h *Handlers) SavePDF(c *gin.Context) {
+// 	// Get authenticated user ID from context
+// 	userId, exists := c.Get("userId")
+// 	if !exists {
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "User ID not found in request context"})
+// 		return
+// 	}
+
+// 	// Retrieve the uploaded PDF file from the form-data
+// 	file, err := c.FormFile("pdf")
+// 	if err != nil {
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to retrieve PDF file: " + err.Error()})
+// 		return
+// 	}
+
+// 	// Open the uploaded file
+// 	pdfFile, err := file.Open()
+// 	if err != nil {
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open PDF file: " + err.Error()})
+// 		return
+// 	}
+// 	defer pdfFile.Close()
+
+// 	// Initialize PDF reader using ledongthuc/pdf
+// 	pdfReader, err := pdf.NewReader(pdfFile, file.Size)
+// 	if err != nil {
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize PDF reader: " + err.Error()})
+// 		return
+// 	}
+
+// 	// Extract text from all pages
+// 	var textBuilder strings.Builder
+// 	numPages := pdfReader.NumPage()
+// 	for i := 1; i <= numPages; i++ {
+// 		page := pdfReader.Page(i)
+// 		if page.V.IsNull() {
+// 			continue // Skip empty or invalid pages
+// 		}
+// 		pageText, err := page.GetPlainText(nil)
+// 		if err != nil {
+// 			continue // Skip pages with extraction errors
+// 		}
+// 		textBuilder.WriteString(pageText + "\n")
+// 	}
+
+// 	fullText := textBuilder.String()
+// 	if fullText == "" {
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": "No readable text found in PDF"})
+// 		return
+// 	}
+
+// 	// Chunk the text (500 characters per chunk)
+// 	const chunkSize = 500
+// 	var chunks []string
+// 	for i := 0; i < len(fullText); i += chunkSize {
+// 		end := i + chunkSize
+// 		if end > len(fullText) {
+// 			end = len(fullText)
+// 		}
+// 		chunks = append(chunks, fullText[i:end])
+// 	}
+
+// 	// Process and store each chunk
+// 	var vectorIds []string
+// 	for chunkIdx, chunk := range chunks {
+// 		// Generate embedding for the chunk
+// 		embedding, err := h.OpenAI.GetEmbedding(chunk)
+// 		if err != nil {
+// 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to generate embedding for chunk %d: %v", chunkIdx, err)})
+// 			return
+// 		}
+
+// 		// Create a unique vector ID
+// 		vectorId := fmt.Sprintf("%s-pdf-%d-%d", userId.(string), time.Now().UnixNano(), chunkIdx)
+// 		vectorIds = append(vectorIds, vectorId)
+
+// 		// Prepare data for storage
+// 		data := models.Data{
+// 			Selected_type: "pdf",
+// 			Text:          chunk,
+// 			UserId:        userId.(string),
+// 		}
+
+// 		// Upsert the vector into Pinecone
+// 		err = h.Pinecone.UpsertVector(c.Request.Context(), vectorId, embedding, data)
+// 		if err != nil {
+// 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to store chunk %d in Pinecone: %v", chunkIdx, err)})
+// 			return
+// 		}
+// 	}
+
+// 	// Return success response
+// 	c.JSON(http.StatusOK, gin.H{
+// 		"message":     "PDF processed and stored successfully",
+// 		"user_id":     userId.(string),
+// 		"type":        "pdf",
+// 		"chunk_count": len(chunks),
+// 		"vector_ids":  vectorIds,
+// 		"timestamp":   time.Now().Format(time.RFC3339),
+// 	})
+// }
 
 // SavePDF handles PDF saving requests
 func (h *Handlers) SavePDF(c *gin.Context) {
@@ -447,6 +585,22 @@ func (h *Handlers) SavePDF(c *gin.Context) {
 		return
 	}
 
+	// Create parent record for the PDF
+	pdfData := &database.UserData{
+		UserID:     userId.(string),
+		VectorID:   "parent-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		DataType:   "pdf",
+		DataValue:  file.Filename,
+		ChunkIndex: 0,
+		CreatedAt:  time.Now(),
+	}
+
+	pdfRecord, err := h.DB.CreateUserData(c.Request.Context(), pdfData)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save PDF metadata: " + err.Error()})
+		return
+	}
+
 	// Chunk the text (500 characters per chunk)
 	const chunkSize = 500
 	var chunks []string
@@ -484,6 +638,23 @@ func (h *Handlers) SavePDF(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to store chunk %d in Pinecone: %v", chunkIdx, err)})
 			return
+		}
+
+		// Store chunk in MongoDB
+		chunkData := &database.UserData{
+			UserID:     userId.(string),
+			VectorID:   vectorId,
+			DataType:   "pdf-chunk",
+			DataValue:  chunk,
+			ParentID:   &pdfRecord.ID, // Reference to parent
+			ChunkIndex: chunkIdx,
+			CreatedAt:  time.Now(),
+		}
+
+		_, err = h.DB.CreateUserData(c.Request.Context(), chunkData)
+		if err != nil {
+			// Log error but continue with other chunks
+			fmt.Printf("Error saving chunk %d to MongoDB: %v\n", chunkIdx, err)
 		}
 	}
 
@@ -559,5 +730,117 @@ func (h *Handlers) ClearCache(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message":      fmt.Sprintf("Successfully cleared rate limit cache for user %s", userId),
 		"keys_cleared": cleared,
+	})
+}
+
+// GetUserData handles retrieving user data
+func (h *Handlers) GetUserData(c *gin.Context) {
+	// Get authenticated user ID
+	userID, exists := c.Get("userId")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	// Optional type filter
+	dataType := c.Query("type")
+
+	var items []*database.UserData
+	var err error
+
+	if dataType != "" {
+		items, err = h.DB.GetUserDataByType(c.Request.Context(), userID.(string), dataType)
+	} else {
+		items, err = h.DB.GetAllUserData(c.Request.Context(), userID.(string))
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user data: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user_id": userID,
+		"items":   items,
+		"count":   len(items),
+	})
+}
+
+// DeleteData handles deleting user data
+func (h *Handlers) DeleteData(c *gin.Context) {
+	// Get authenticated user ID
+	userID, exists := c.Get("userId")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	// Get item ID from URL
+	idStr := c.Param("id")
+
+	// Get the data to check ownership and get vector ID
+	userData, err := h.DB.GetUserDataByID(c.Request.Context(), idStr)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch item: " + err.Error()})
+		}
+		return
+	}
+
+	// Check ownership
+	if userData.UserID != userID.(string) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not authorized to delete this item"})
+		return
+	}
+
+	// Handle based on data type
+	if userData.DataType == "pdf" {
+		// Get PDF chunks
+		chunks, err := h.DB.GetPDFChunks(c.Request.Context(), idStr)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get PDF chunks: " + err.Error()})
+			return
+		}
+
+		// Delete each chunk's vector from Pinecone
+		for _, chunk := range chunks {
+			err = h.Pinecone.DeleteVector(c.Request.Context(), chunk.VectorID)
+			if err != nil {
+				// Log error but continue
+				fmt.Printf("Warning: Failed to delete vector %s from Pinecone: %v\n", chunk.VectorID, err)
+			}
+		}
+
+		// Delete PDF and chunks from database
+		err = h.DB.DeletePDFWithChunks(c.Request.Context(), idStr, userID.(string))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError,
+				gin.H{"error": "Failed to delete PDF from database: " + err.Error()})
+			return
+		}
+	} else {
+		// Regular item (note, tweet)
+
+		// Delete vector from Pinecone
+		err = h.Pinecone.DeleteVector(c.Request.Context(), userData.VectorID)
+		if err != nil {
+			// Log error but continue
+			fmt.Printf("Warning: Failed to delete vector %s from Pinecone: %v\n", userData.VectorID, err)
+		}
+
+		// Delete from database
+		err = h.DB.DeleteUserData(c.Request.Context(), idStr, userID.(string))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError,
+				gin.H{"error": "Failed to delete from database: " + err.Error()})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Item deleted successfully",
+		"id":      idStr,
 	})
 }

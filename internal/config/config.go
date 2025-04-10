@@ -17,6 +17,7 @@ type Config struct {
 	RedisURL          string
 	XAPIBearerToken   string
 	AdminAPIKey       string
+	MongoDBURI        string
 }
 
 // LoadConfig loads configuration from environment variables
@@ -45,6 +46,11 @@ func LoadConfig() (*Config, error) {
 		port = "8080"
 	}
 
+	mongoDBURI := os.Getenv("MONGODB_URI")
+	if mongoDBURI == "" {
+		return nil, fmt.Errorf("MONGODB_URI environment variable is required")
+	}
+
 	return &Config{
 		Port:              port,
 		OpenAIAPIKey:      os.Getenv("OPENAI_API_KEY"),
@@ -54,5 +60,6 @@ func LoadConfig() (*Config, error) {
 		RedisURL:          os.Getenv("UPSTASH_REDIS_URL"),
 		XAPIBearerToken:   os.Getenv("X_API_BEARER_TOKEN"),
 		AdminAPIKey:       os.Getenv("ADMIN_API_KEY"),
+		MongoDBURI:        mongoDBURI,
 	}, nil
 }

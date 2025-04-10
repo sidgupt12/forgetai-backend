@@ -6,7 +6,6 @@ import (
 	"github.com/siddhantgupta/forgetai-backend/internal/services"
 )
 
-// SetupRoutes configures all routes for the application
 func SetupRoutes(
 	r *gin.Engine,
 	handlers *Handlers,
@@ -16,25 +15,26 @@ func SetupRoutes(
 	// Public endpoints
 	r.GET("/health", handlers.HealthCheck)
 
-	// Protected API group
+	// Protected API group - all endpoints require authentication
 	api := r.Group("/api")
 	api.Use(auth.AuthMiddleware(clerkAuth))
-	api.Use(auth.RateLimitMiddleware(redisService))
 
-	// Data routes
-	api.POST("/save", handlers.SaveData)
-	api.POST("/query", handlers.QueryData)
+	// Non-rate-limited endpoints (data retrieval and session management)
+	api.GET("/data", handlers.GetUserData)              // MongoDB data retrieval
+	api.DELETE("/data/:id", handlers.DeleteData)        // MongoDB data deletion
+	api.GET("/session/:sessionId", handlers.GetSession) // Get session
+	api.GET("/usage", handlers.GetUsage)                // Usage statistics
 
-	// Session routes
-	api.POST("/reset-session", handlers.ResetSession)
-	api.GET("/session/:sessionId", handlers.GetSession)
+	// Rate-limited endpoints (resource-intensive operations)
+	rateLimited := api.Group("/")
+	rateLimited.Use(auth.RateLimitMiddleware(redisService))
 
-	// File import routes
-	api.POST("/save-tweet", handlers.SaveTweet)
-	api.POST("/save-pdf", handlers.SavePDF)
-
-	// Usage routes
-	api.GET("/usage", handlers.GetUsage)
+	// Data creation routes (rate-limited)
+	rateLimited.POST("/save", handlers.SaveData)
+	rateLimited.POST("/query", handlers.QueryData)
+	rateLimited.POST("/reset-session", handlers.ResetSession)
+	rateLimited.POST("/save-tweet", handlers.SaveTweet)
+	rateLimited.POST("/save-pdf", handlers.SavePDF)
 
 	// Admin routes
 	r.POST("/admin/clear-cache", handlers.ClearCache)

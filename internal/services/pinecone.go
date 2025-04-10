@@ -97,3 +97,20 @@ func (s *PineconeService) QueryVectors(ctx context.Context, userId string, embed
 
 	return res, nil
 }
+
+// DeleteVector deletes a vector from Pinecone
+func (s *PineconeService) DeleteVector(ctx context.Context, vectorId string) error {
+	idxConnection, err := s.client.Index(pinecone.NewIndexConnParams{
+		Host: s.indexHost,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to connect to index: %v", err)
+	}
+
+	err = idxConnection.DeleteVectorsById(ctx, []string{vectorId})
+	if err != nil {
+		return fmt.Errorf("failed to delete vector: %v", err)
+	}
+
+	return nil
+}
