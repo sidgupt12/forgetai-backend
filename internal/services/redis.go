@@ -97,3 +97,8 @@ func (s *RedisService) ClearRateLimits(ctx context.Context, userId string) (int6
 
 	return s.client.Del(ctx, keys...).Result()
 }
+
+// Ping checks if the Redis connection is alive
+func (s *RedisService) Ping(ctx context.Context) (string, error) {
+	return s.client.Ping(ctx).Result()
+}

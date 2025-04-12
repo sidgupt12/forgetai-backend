@@ -267,3 +267,8 @@ func (m *MongoDB) GetVectorIDByDataID(ctx context.Context, id string) (string, e
 
 	return result.VectorID, err
 }
+
+// Ping checks if the MongoDB connection is alive
+func (m *MongoDB) Ping(ctx context.Context) error {
+	return m.client.Ping(ctx, nil)
+}

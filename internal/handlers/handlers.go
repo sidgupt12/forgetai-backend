@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -50,8 +51,35 @@ func NewHandlers(
 }
 
 // HealthCheck handles health check requests
+// HealthCheck handles health check requests
 func (h *Handlers) HealthCheck(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	status := "ok"
+	mongoStatus := "ok"
+	redisStatus := "ok"
+
+	// Check MongoDB
+	if err := h.DB.Ping(ctx); err != nil {
+		status = "degraded"
+		mongoStatus = fmt.Sprintf("error: %v", err)
+	}
+
+	// Check Redis
+	_, err := h.Redis.Ping(ctx)
+	if err != nil {
+		status = "degraded"
+		redisStatus = fmt.Sprintf("error: %v", err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": status,
+		"services": gin.H{
+			"mongodb": mongoStatus,
+			"redis":   redisStatus,
+		},
+	})
 }
 
 // SaveData handles saving data requests
