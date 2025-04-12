@@ -51,7 +51,6 @@ func NewHandlers(
 }
 
 // HealthCheck handles health check requests
-// HealthCheck handles health check requests
 func (h *Handlers) HealthCheck(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
