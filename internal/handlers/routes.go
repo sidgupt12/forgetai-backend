@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/siddhantgupta/forgetai-backend/internal/auth"
 	"github.com/siddhantgupta/forgetai-backend/internal/services"
@@ -12,6 +14,11 @@ func SetupRoutes(
 	clerkAuth *auth.ClerkAuth,
 	redisService *services.RedisService,
 ) {
+
+	r.GET("/healthz", func(c *gin.Context) {
+		c.String(http.StatusOK, "OK")
+	})
+
 	// Public endpoints
 	r.GET("/health", handlers.HealthCheck)
 

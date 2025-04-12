@@ -3,7 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -15,6 +19,12 @@ import (
 )
 
 func main() {
+
+	if os.Getenv("CLOUD_RUN") == "true" {
+		fmt.Println("Running in Cloud Run, waiting 5 seconds for network initialization...")
+		time.Sleep(5 * time.Second)
+	}
+
 	// Load environment variables from .env file
 	if err := godotenv.Load(); err != nil {
 		fmt.Printf("Warning: .env file not found: %v\n", err)
@@ -25,6 +35,13 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error loading configuration: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Check for PORT environment variable (for Cloud Run)
+	port := os.Getenv("PORT")
+	if port != "" {
+		fmt.Printf("Using PORT from environment: %s\n", port)
+		cfg.Port = port
 	}
 
 	// Print MongoDB connection info (for debugging)
@@ -83,9 +100,35 @@ func main() {
 	// Setup routes
 	handlers.SetupRoutes(r, apiHandlers, clerkAuth, redisService)
 
-	// Start server
-	fmt.Printf("Server is running on port %s\n", cfg.Port)
-	r.Run(":" + cfg.Port)
+	// Create a server with graceful shutdown
+	srv := &http.Server{
+		Addr:    "0.0.0.0:" + cfg.Port, // Change from ":" + cfg.Port to explicitly bind to all interfaces
+		Handler: r,
+	}
+
+	// Start server in a goroutine
+	go func() {
+		fmt.Printf("Server is running on port %s\n", cfg.Port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("Server error: %v\n", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	fmt.Println("Shutting down server...")
+
+	// Allow 10 seconds for graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		fmt.Printf("Server forced to shutdown: %v\n", err)
+	}
 }
 
 // maskPassword masks the password in a connection string for logging
