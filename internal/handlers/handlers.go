@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/ledongthuc/pdf"
+	"github.com/pinecone-io/go-pinecone/v3/pinecone"
 	"github.com/sashabaranov/go-openai"
 	"github.com/siddhantgupta/forgetai-backend/internal/database"
 	"github.com/siddhantgupta/forgetai-backend/internal/models"
@@ -165,7 +167,10 @@ func (h *Handlers) QueryData(c *gin.Context) {
 	}
 
 	// Get or create session
-	sessionId, _ := h.Session.GetOrCreateSession(req.SessionId, authenticatedUserId.(string))
+	sessionId, session := h.Session.GetOrCreateSession(req.SessionId, authenticatedUserId.(string))
+
+	// Check if this is the first query in the session
+	isFirstQuery := len(session.Messages) == 0
 
 	// Get embedding for the query
 	embedding, err := h.OpenAI.GetEmbedding(req.Text)
@@ -174,66 +179,47 @@ func (h *Handlers) QueryData(c *gin.Context) {
 		return
 	}
 
-	// Search for relevant context in Pinecone
-	res, err := h.Pinecone.QueryVectors(c.Request.Context(), authenticatedUserId.(string), embedding)
+	// For first query, do an initial query to warm up the cache
+	var res *pinecone.QueryVectorsResponse
+	if isFirstQuery {
+		fmt.Println("First query in session - warming up cache...")
+		// Do initial query
+		_, err := h.Pinecone.QueryVectors(c.Request.Context(), authenticatedUserId.(string), embedding)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query database: " + err.Error()})
+			return
+		}
+		// Small delay to allow caching
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Do the actual query
+	res, err = h.Pinecone.QueryVectors(c.Request.Context(), authenticatedUserId.(string), embedding)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query database: " + err.Error()})
 		return
 	}
 
 	// Process the results
-	// Process the results
 	contextText := ""
 	if len(res.Matches) > 0 {
-		// Use a map to deduplicate similar content
-		uniqueResults := make(map[string]struct {
-			text     string
-			score    float32
-			dataType string
+		// Sort matches by score in descending order
+		sort.Slice(res.Matches, func(i, j int) bool {
+			return res.Matches[i].Score > res.Matches[j].Score
 		})
 
-		for _, match := range res.Matches[:utils.Min(10, len(res.Matches))] { // Take up to 10 matches
-			metadata := match.Vector.Metadata.AsMap()
-			text := metadata["text"].(string)
-			dataType := metadata["type"].(string) // Get the content type
-
-			// Use the first 50 chars as a key to avoid duplication of very similar content
-			key := text
-			if len(key) > 50 {
-				key = key[:50]
-			}
-
-			// Only keep the highest scoring version of similar content
-			existing, exists := uniqueResults[key]
-			if !exists || match.Score > existing.score {
-				uniqueResults[key] = struct {
-					text     string
-					score    float32
-					dataType string
-				}{
-					text:     text,
-					score:    match.Score,
-					dataType: dataType,
-				}
-			}
-		}
+		// Take top 10 matches
+		topMatches := res.Matches[:utils.Min(10, len(res.Matches))]
 
 		// Format results
-		resultNum := 1
-		for key, result := range uniqueResults {
-			if resultNum > 5 {
-				break // Only use top 5 unique results
-			}
-
-			// Get full text if we truncated for deduplication
-			fullText := result.text
-			if len(key) == 50 && len(key) < len(fullText) {
-				fullText = result.text + "..." // Add ellipsis if truncated
-			}
+		for i, match := range topMatches {
+			metadata := match.Vector.Metadata.AsMap()
+			text := metadata["text"].(string)
+			dataType := metadata["type"].(string)
 
 			// Include content type in the result
 			contentTypeStr := ""
-			switch result.dataType {
+			switch dataType {
 			case "tweet":
 				contentTypeStr = "[Tweet] "
 			case "pdf":
@@ -244,12 +230,10 @@ func (h *Handlers) QueryData(c *gin.Context) {
 				contentTypeStr = "[Note] "
 			}
 
+			// Add result to context
 			contextText += fmt.Sprintf("Result %d: %s%s (Relevance: %.2f)\n\n",
-				resultNum, contentTypeStr, fullText, result.score)
-			resultNum++
+				i+1, contentTypeStr, text, match.Score)
 		}
-	} else {
-		contextText = "No relevant information found in your saved data."
 	}
 
 	// Add user's query to the session
@@ -261,7 +245,6 @@ func (h *Handlers) QueryData(c *gin.Context) {
 	// Add system message with context if available
 	systemPrompt := "You are ForgetAI, a personal memory assistant that helps users remember their saved information. Answer based on the user's saved data provided in the context below. Content types are labeled as [Tweet], [PDF Content], or [Note].\n\n" +
 		"Guidelines:\n" +
-		"- If asked about specific content types (tweets, PDFs, notes), only reference them if present in the results\n" +
 		"- When relevant information is found, provide helpful and concise responses\n" +
 		"- If no relevant information is available, acknowledge that you don't have that specific information saved, but be conversational\n" +
 		"- Never make up information or claim to know something not in the provided context\n" +
@@ -271,8 +254,6 @@ func (h *Handlers) QueryData(c *gin.Context) {
 
 	if contextText != "" {
 		systemPrompt += "\n\nContext from saved data:\n" + contextText
-	} else {
-		systemPrompt += "\n\nNo matching information was found in your saved data. Please respond conversationally, acknowledging the lack of relevant information, and offer a helpful suggestion about what kinds of content the user might want to save to help with similar queries in the future."
 	}
 
 	// Create the final chat messages with the system message at the beginning
@@ -295,7 +276,7 @@ func (h *Handlers) QueryData(c *gin.Context) {
 	h.Session.AddMessageToSession(sessionId, "assistant", response)
 
 	// Get the session to count messages
-	session, _ := h.Session.GetSession(sessionId)
+	sessionValue, _ := h.Session.GetSession(sessionId)
 
 	// Return the response
 	c.JSON(http.StatusOK, models.QueryResponse{
@@ -303,7 +284,7 @@ func (h *Handlers) QueryData(c *gin.Context) {
 		Answer:       response,
 		ContextText:  contextText,
 		SessionId:    sessionId,
-		SessionCount: len(session.Messages) / 2, // Count conversation turns
+		SessionCount: len(sessionValue.Messages) / 2, // Count conversation turns
 		Timestamp:    time.Now(),
 	})
 }
