@@ -21,6 +21,7 @@ func NewOpenAIService(apiKey string) *OpenAIService {
 
 // GetEmbedding generates an embedding for the given text
 func (s *OpenAIService) GetEmbedding(text string) ([]float32, error) {
+	fmt.Printf("Generating embedding for text: %s\n", text)
 	req := openai.EmbeddingRequest{
 		Input: []string{text},
 		Model: "text-embedding-3-small",
@@ -32,6 +33,7 @@ func (s *OpenAIService) GetEmbedding(text string) ([]float32, error) {
 	if len(resp.Data) == 0 {
 		return nil, fmt.Errorf("no embedding data returned")
 	}
+	fmt.Printf("Generated embedding of length: %d\n", len(resp.Data[0].Embedding))
 	return resp.Data[0].Embedding, nil
 }
 

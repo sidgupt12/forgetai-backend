@@ -56,7 +56,7 @@ func (s *RedisService) CheckRateLimit(ctx context.Context, userId, endpoint stri
 	}
 
 	// Check if rate limit exceeded (10 calls per user per endpoint per day)
-	return count > 10, nil
+	return count > 30, nil
 }
 
 // GetRateLimitCount returns the current rate limit count for a user and endpoint
@@ -76,6 +76,7 @@ func (s *RedisService) GetRateLimitCount(ctx context.Context, userId, endpoint s
 // StoreJWKs stores JWKS in Redis cache
 func (s *RedisService) StoreJWKs(ctx context.Context, jwksData []byte) error {
 	return s.client.Set(ctx, "clerk-jwks", jwksData, 30*time.Minute).Err()
+	// return s.client.Set(ctx, "clerk-jwks", jwksData, 24*time.hours).Err()
 }
 
 // GetJWKs retrieves JWKS from Redis cache
